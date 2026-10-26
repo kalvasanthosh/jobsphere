@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/components/Header.tsx","./src/components/JobsView.tsx","./src/components/StudentView.tsx","./src/components/icons.tsx","./src/lib/resumeOptimizer.ts","./src/lib/supabase.ts"],"errors":true,"version":"5.9.3"}
