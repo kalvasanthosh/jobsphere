@@ -1,5 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { supabase, type Application, type StudentProfile } from '../lib/supabase'
+import {
+  fetchJobs,
+  emojiForCompany,
+  stripHtml,
+  truncate,
+  timeAgo,
+  extractCountry,
+  extractDomain,
+  estimateSalary,
+  buildRequirements,
+  SALARY_RANGES,
+  type ApiJob,
+} from '../lib/jobApi'
 import {
   MapPin,
   CheckCircle,
@@ -10,65 +23,21 @@ import {
   Globe,
   RefreshCw,
   AlertCircle,
+  Filter,
+  X,
 } from './icons'
 
-type ApiJob = {
-  slug: string
-  company_name: string
-  title: string
-  description: string
-  remote: boolean
-  url: string
-  tags: string[]
-  job_types: string[]
-  location: string
-  created_at: number
-}
+type JobTypeFilter = 'all' | 'remote' | 'full_time' | 'internship' | 'contract'
 
-const API_URL = 'https://www.arbeitnow.com/api/job-board-api'
-
-const COMPANY_EMOJIS = ['🚀', '💳', '⛰️', '📊', '🏢', '🛰️', '🧪', '⚡', '🔧', '🎨', '🌐', '🔬', '💡', '🏗️', '🤖', '📱']
-
-function emojiForCompany(name: string): string {
-  let hash = 0
-  for (let i = 0; i < name.length; i++) {
-    hash = (hash * 31 + name.charCodeAt(i)) | 0
-  }
-  return COMPANY_EMOJIS[Math.abs(hash) % COMPANY_EMOJIS.length]
-}
-
-function stripHtml(html: string): string {
-  const tmp = document.createElement('div')
-  tmp.innerHTML = html
-  return (tmp.textContent || tmp.innerText || '').replace(/\s+/g, ' ').trim()
-}
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text
-  return text.slice(0, max).replace(/\s+\S*$/, '') + '…'
-}
-
-function timeAgo(unix: number): string {
-  const diff = Date.now() / 1000 - unix
-  const days = Math.floor(diff / 86400)
-  if (days >= 1) return `${days}d ago`
-  const hours = Math.floor(diff / 3600)
-  if (hours >= 1) return `${hours}h ago`
-  const mins = Math.floor(diff / 60)
-  return mins >= 1 ? `${mins}m ago` : 'just now'
-}
-
-type FilterKey = 'all' | 'remote' | 'full_time' | 'internship' | 'contract'
-
-const FILTERS: { key: FilterKey; label: string }[] = [
-  { key: 'all', label: 'All roles' },
+const TYPE_FILTERS: { key: JobTypeFilter; label: string }[] = [
+  { key: 'all', label: 'All types' },
   { key: 'remote', label: 'Remote' },
   { key: 'full_time', label: 'Full-time' },
   { key: 'internship', label: 'Internship' },
   { key: 'contract', label: 'Contract' },
 ]
 
-function matchesFilter(job: ApiJob, filter: FilterKey): boolean {
+function matchesType(job: ApiJob, filter: JobTypeFilter): boolean {
   if (filter === 'all') return true
   if (filter === 'remote') return job.remote
   const types = job.job_types.map((t) => t.toLowerCase())
@@ -85,8 +54,13 @@ export function JobsView() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [applyingSlug, setApplyingSlug] = useState<string | null>(null)
-  const [filter, setFilter] = useState<FilterKey>('all')
+
+  // Filters
+  const [typeFilter, setTypeFilter] = useState<JobTypeFilter>('all')
   const [search, setSearch] = useState('')
+  const [countryFilter, setCountryFilter] = useState('all')
+  const [domainFilter, setDomainFilter] = useState('all')
+  const [salaryFilter, setSalaryFilter] = useState('all')
 
   useEffect(() => {
     void loadData()
@@ -96,15 +70,12 @@ export function JobsView() {
     setLoading(true)
     setError(null)
     try {
-      const [jobsRes, appsRes, profileRes] = await Promise.all([
-        fetch(API_URL),
+      const [jobsData, appsRes, profileRes] = await Promise.all([
+        fetchJobs(),
         supabase.from('applications').select('*'),
         supabase.from('student_profiles').select('*').limit(1).maybeSingle(),
       ])
-      if (!jobsRes.ok) throw new Error(`API returned ${jobsRes.status}`)
-      const json = await jobsRes.json()
-      const fetched = (json.data ?? []) as ApiJob[]
-      setJobs(fetched)
+      setJobs(jobsData)
       setApplications((appsRes.data as Application[]) ?? [])
       setProfile(profileRes.data as StudentProfile | null)
     } catch (err) {
@@ -112,10 +83,6 @@ export function JobsView() {
     } finally {
       setLoading(false)
     }
-  }
-
-  async function refresh() {
-    await loadData()
   }
 
   const appliedSlugs = new Set(applications.map((a) => a.job_id))
@@ -132,18 +99,65 @@ export function JobsView() {
     setApplyingSlug(null)
   }
 
-  const filteredJobs = jobs
-    .filter((j) => matchesFilter(j, filter))
-    .filter((j) => {
-      if (!search.trim()) return true
-      const q = search.toLowerCase()
-      return (
-        j.title.toLowerCase().includes(q) ||
-        j.company_name.toLowerCase().includes(q) ||
-        j.location.toLowerCase().includes(q) ||
-        j.tags.some((t) => t.toLowerCase().includes(q))
-      )
-    })
+  // Precompute country/domain/salary per job once
+  const enriched = useMemo(
+    () =>
+      jobs.map((j) => ({
+        job: j,
+        country: extractCountry(j.location),
+        domain: extractDomain(j),
+        salary: estimateSalary(j),
+      })),
+    [jobs],
+  )
+
+  // Build dropdown options from data
+  const countries = useMemo(() => {
+    const set = new Set<string>()
+    enriched.forEach((e) => set.add(e.country))
+    return ['all', ...Array.from(set).sort()]
+  }, [enriched])
+
+  const domains = useMemo(() => {
+    const set = new Set<string>()
+    enriched.forEach((e) => set.add(e.domain))
+    return ['all', ...Array.from(set).sort()]
+  }, [enriched])
+
+  const filteredJobs = useMemo(() => {
+    const salaryRange = SALARY_RANGES.find((r) => r.key === salaryFilter) ?? SALARY_RANGES[0]
+    return enriched
+      .filter((e) => matchesType(e.job, typeFilter))
+      .filter((e) => countryFilter === 'all' || e.country === countryFilter)
+      .filter((e) => domainFilter === 'all' || e.domain === domainFilter)
+      .filter((e) => e.salary.min >= salaryRange.min && e.salary.min <= salaryRange.max)
+      .filter((e) => {
+        if (!search.trim()) return true
+        const q = search.toLowerCase()
+        return (
+          e.job.title.toLowerCase().includes(q) ||
+          e.job.company_name.toLowerCase().includes(q) ||
+          e.job.location.toLowerCase().includes(q) ||
+          e.job.tags.some((t) => t.toLowerCase().includes(q))
+        )
+      })
+      .map((e) => e.job)
+  }, [enriched, typeFilter, countryFilter, domainFilter, salaryFilter, search])
+
+  const activeFilterCount =
+    (typeFilter !== 'all' ? 1 : 0) +
+    (countryFilter !== 'all' ? 1 : 0) +
+    (domainFilter !== 'all' ? 1 : 0) +
+    (salaryFilter !== 'all' ? 1 : 0) +
+    (search.trim() ? 1 : 0)
+
+  function clearAll() {
+    setTypeFilter('all')
+    setCountryFilter('all')
+    setDomainFilter('all')
+    setSalaryFilter('all')
+    setSearch('')
+  }
 
   if (loading) {
     return (
@@ -164,7 +178,7 @@ export function JobsView() {
           <h3 className="font-bold text-slate-900">Couldn't load job listings</h3>
           <p className="mt-1 text-sm text-slate-500">{error}</p>
         </div>
-        <button onClick={refresh} className="btn-primary">
+        <button onClick={loadData} className="btn-primary">
           <RefreshCw className="h-4 w-4" /> Try again
         </button>
       </div>
@@ -177,33 +191,38 @@ export function JobsView() {
         <div>
           <h2 className="text-lg font-bold text-slate-900">Live Job Board</h2>
           <p className="text-sm text-slate-500">
-            {filteredJobs.length} real open positions — updated hourly via Arbeitnow.
+            {filteredJobs.length} of {jobs.length} real open positions — updated hourly via Arbeitnow.
           </p>
         </div>
-        <button onClick={refresh} className="btn-ghost self-start">
+        <button onClick={loadData} className="btn-ghost self-start">
           <RefreshCw className="h-4 w-4" /> Refresh
         </button>
       </div>
 
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-1 self-start overflow-x-auto">
-          {FILTERS.map((f) => (
-            <button
-              key={f.key}
-              onClick={() => setFilter(f.key)}
-              className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-semibold transition-all duration-200 ${
-                filter === f.key ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'
-              }`}
-            >
-              {f.label}
+      {/* Advanced filter bar */}
+      <div className="card space-y-3 p-4">
+        <div className="flex items-center gap-2">
+          <Filter className="h-4 w-4 text-brand-600" />
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Filters</span>
+          {activeFilterCount > 0 && (
+            <button onClick={clearAll} className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-slate-400 hover:text-red-500">
+              <X className="h-3.5 w-3.5" /> Clear all ({activeFilterCount})
             </button>
-          ))}
+          )}
         </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <SelectField label="Country / Location" value={countryFilter} onChange={setCountryFilter} options={countries.map((c) => ({ value: c, label: c === 'all' ? 'All countries' : c }))} />
+          <SelectField label="Domain" value={domainFilter} onChange={setDomainFilter} options={domains.map((d) => ({ value: d, label: d === 'all' ? 'All domains' : d }))} />
+          <SelectField label="Salary Range" value={salaryFilter} onChange={setSalaryFilter} options={SALARY_RANGES.map((r) => ({ value: r.key, label: r.label }))} />
+          <SelectField label="Job Type" value={typeFilter} onChange={(v) => setTypeFilter(v as JobTypeFilter)} options={TYPE_FILTERS.map((f) => ({ value: f.key, label: f.label }))} />
+        </div>
+
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search role, company, or tech…"
-          className="input flex-1"
+          className="input"
         />
       </div>
 
@@ -215,6 +234,7 @@ export function JobsView() {
           const jobType = job.job_types[0] || 'Full Time'
           const companyEmoji = emojiForCompany(job.company_name)
           const requirements = buildRequirements(job)
+          const salary = estimateSalary(job)
 
           return (
             <article
@@ -246,6 +266,7 @@ export function JobsView() {
                     <Globe className="h-3.5 w-3.5" /> Remote
                   </span>
                 )}
+                <span className="inline-flex items-center text-slate-400">{salary.label}</span>
                 <span className="inline-flex items-center text-slate-400">{timeAgo(job.created_at)}</span>
               </div>
 
@@ -321,8 +342,8 @@ export function JobsView() {
 
       {filteredJobs.length === 0 && (
         <div className="py-12 text-center">
-          <p className="text-sm text-slate-400">No roles match your search right now.</p>
-          <button onClick={() => { setFilter('all'); setSearch('') }} className="mt-3 btn-ghost">
+          <p className="text-sm text-slate-400">No roles match your filters right now.</p>
+          <button onClick={clearAll} className="mt-3 btn-ghost">
             Clear filters
           </button>
         </div>
@@ -331,16 +352,36 @@ export function JobsView() {
   )
 }
 
-function buildRequirements(job: ApiJob): string[] {
-  const reqs: string[] = []
-  const techTags = job.tags.filter((t) => t !== 'Tech' && t.length > 1)
-  if (techTags.length > 0) {
-    reqs.push(`Tech stack: ${techTags.slice(0, 4).join(', ')}`)
-  }
-  reqs.push(job.remote ? 'Remote-friendly — work from anywhere' : `Based in ${job.location || 'specified location'}`)
-  reqs.push('GitHub portfolio link recommended')
-  const types = job.job_types.join(' / ')
-  if (types) reqs.push(`Role type: ${types}`)
-  if (reqs.length < 4) reqs.push('Strong communication skills in English')
-  return reqs.slice(0, 5)
+function SelectField({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  options: { value: string; label: string }[]
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</span>
+      <div className="relative">
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="input cursor-pointer appearance-none pr-9"
+        >
+          {options.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <svg className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="m6 9 6 6 6-6" />
+        </svg>
+      </div>
+    </label>
+  )
 }

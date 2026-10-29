@@ -1,6 +1,12 @@
 import { Rocket } from './icons'
 
-type View = 'student' | 'jobs'
+type View = 'student' | 'jobs' | 'recruiter'
+
+const TABS: { key: View; label: string }[] = [
+  { key: 'student', label: 'Student' },
+  { key: 'jobs', label: 'Job Board' },
+  { key: 'recruiter', label: 'Recruiter' },
+]
 
 export function Header({
   view,
@@ -27,28 +33,23 @@ export function Header({
         </div>
 
         <nav className="flex items-center gap-1 rounded-xl bg-slate-100 p-1">
-          <button
-            onClick={() => onChangeView('student')}
-            className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition-all duration-200 sm:px-4 ${
-              view === 'student'
-                ? 'bg-white text-brand-700 shadow-sm'
-                : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            Student
-          </button>
-          <button
-            onClick={() => onChangeView('jobs')}
-            className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition-all duration-200 sm:px-4 ${
-              view === 'jobs'
-                ? 'bg-white text-brand-700 shadow-sm'
-                : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            Job Board
-          </button>
+          {TABS.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => onChangeView(tab.key)}
+              className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition-all duration-200 sm:px-4 ${
+                view === tab.key
+                  ? 'bg-white text-brand-700 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </nav>
       </div>
     </header>
   )
 }
+
+export type { View }
